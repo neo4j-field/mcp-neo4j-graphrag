@@ -1,5 +1,9 @@
 # Neo4j GraphRAG MCP Server
 
+[![PyPI version](https://badge.fury.io/py/mcp-neo4j-graphrag.svg)](https://pypi.org/project/mcp-neo4j-graphrag/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 An MCP server that extends Neo4j with **vector search**, **fulltext search**, and **search-augmented Cypher queries** for GraphRAG applications.
 
 > **Inspired by** the [Neo4j Labs `mcp-neo4j-cypher`](https://github.com/neo4j-contrib/mcp-neo4j/tree/main/servers/mcp-neo4j-cypher) server. This server adds vector search, fulltext search, and the innovative `search_cypher_query` tool for combining search with graph traversal.
@@ -18,34 +22,28 @@ Built on [LiteLLM](https://docs.litellm.ai/) for multi-provider embedding suppor
 
 ## Installation
 
-### Step 1: Download the Repository
-
 ```bash
-git clone https://github.com/guerinjeanmarc/mcp-neo4j-graphrag.git
-cd mcp-neo4j-graphrag
+# Using pip
+pip install mcp-neo4j-graphrag
+
+# Using uv (recommended)
+uv pip install mcp-neo4j-graphrag
 ```
 
-### Step 2: Configure Your MCP Client
+## Configuration
 
-#### Claude Desktop
+### Claude Desktop
 
 Edit the configuration file:
 - **macOS/Linux:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
-Add this server configuration (update the path to where you cloned the repo):
-
 ```json
 {
   "mcpServers": {
     "neo4j-graphrag": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/path/to/mcp-neo4j-graphrag",
-        "run",
-        "mcp-neo4j-graphrag"
-      ],
+      "command": "uvx",
+      "args": ["mcp-neo4j-graphrag"],
       "env": {
         "NEO4J_URI": "neo4j+s://demo.neo4jlabs.com",
         "NEO4J_USERNAME": "recommendations",
@@ -59,11 +57,13 @@ Add this server configuration (update the path to where you cloned the repo):
 }
 ```
 
-#### Cursor
+> **Note**: `uvx` automatically downloads and runs the package from PyPI. No local installation needed!
 
-Edit `.cursor/mcp.json` in your project or global settings. Use the same configuration as above.
+### Cursor
 
-### Step 3: Reload Configuration
+Edit `~/.cursor/mcp.json` or `.cursor/mcp.json` in your project. Use the same configuration as above.
+
+### Reload Configuration
 
 - **Claude Desktop:** Quit and restart the application
 - **Cursor:** Reload the window (Cmd/Ctrl + Shift + P → "Reload Window")
@@ -115,9 +115,7 @@ Combine vector/fulltext search with Cypher queries. Use `$vector_embedding` and 
 **Example prompt:**
 > "In one query, what are the directors and genres of the movies about 'time travel adventure' "
 
-## Configuration
-
-### Environment Variables
+## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
