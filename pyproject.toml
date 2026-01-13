@@ -7,7 +7,17 @@ license = {text = "MIT"}
 authors = [
     {name = "Jean-Marc Guerin"}
 ]
-keywords = ["neo4j", "graphrag", "mcp", "vector-search", "knowledge-graph", "llm"]
+keywords = ["neo4j", "graphrag", "mcp", "vector-search", "knowledge-graph", "llm", "rag", "embeddings"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Database",
+]
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=2.10.5",
