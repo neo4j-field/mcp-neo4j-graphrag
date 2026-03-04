@@ -61,31 +61,39 @@ def _value_sanitize(
                 new_dict[key] = _value_sanitize(value, list_limit, string_limit)
             elif isinstance(value, list):
                 if len(value) >= list_limit:
-                    # Replace large lists with descriptive placeholder
                     new_dict[key] = f"<list with {len(value)} items (truncated, limit: {list_limit})>"
                 else:
                     new_dict[key] = _value_sanitize(value, list_limit, string_limit)
             elif isinstance(value, str):
                 if len(value) >= string_limit:
-                    # Truncate large strings with descriptive suffix
                     new_dict[key] = value[:string_limit] + f"... <truncated at {string_limit} chars, total: {len(value)}>"
                 else:
                     new_dict[key] = value
+            elif hasattr(value, '__len__') and not isinstance(value, (bytes,)):
+                # Catches Neo4j VECTOR type or other sequence-like objects not covered above
+                if len(value) >= list_limit:
+                    new_dict[key] = f"<vector/sequence with {len(value)} items (truncated)>"
+                else:
+                    new_dict[key] = list(value)
             else:
                 new_dict[key] = value
         return new_dict
     elif isinstance(d, list):
         if len(d) >= list_limit:
-            # Replace large lists with descriptive placeholder
             return f"<list with {len(d)} items (truncated, limit: {list_limit})>"
         else:
             return [_value_sanitize(item, list_limit, string_limit) for item in d]
     elif isinstance(d, str):
         if len(d) >= string_limit:
-            # Truncate large strings
             return d[:string_limit] + f"... <truncated at {string_limit} chars, total: {len(d)}>"
         else:
             return d
+    elif hasattr(d, '__len__') and not isinstance(d, (bytes,)):
+        # Top-level Neo4j VECTOR type or other sequence
+        if len(d) >= list_limit:
+            return f"<vector/sequence with {len(d)} items (truncated)>"
+        else:
+            return list(d)
     else:
         return d
 

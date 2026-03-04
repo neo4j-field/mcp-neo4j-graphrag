@@ -44,6 +44,7 @@ htmlcov/
 # Environment variables
 .env
 .env.local
+.mcp.json
 
 # uv
 .uv/

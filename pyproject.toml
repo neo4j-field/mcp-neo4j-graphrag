@@ -1,7 +1,7 @@
 [project]
 name = "mcp-neo4j-graphrag"
-version = "0.3.0"
-description = "A unified Neo4j MCP server for GraphRAG: vector search, fulltext search, and search-augmented Cypher queries"
+version = "0.4.0"
+description = "A unified Neo4j MCP server for GraphRAG: vector search, fulltext search, search-augmented Cypher queries, write operations, and multimodal image retrieval"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
@@ -25,6 +25,7 @@ dependencies = [
     "pydantic>=2.10.1",
     "tiktoken>=0.11.0",
     "litellm>=1.50.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.urls]

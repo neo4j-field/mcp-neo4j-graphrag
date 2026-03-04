@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An MCP server that extends Neo4j with **vector search**, **fulltext search**, and **search-augmented Cypher queries** for GraphRAG applications.
+An MCP server that extends Neo4j with **vector search**, **fulltext search**, **search-augmented Cypher queries**, **write operations**, and **multimodal image retrieval** for GraphRAG applications.
 
 > **Inspired by** the [Neo4j Labs `mcp-neo4j-cypher`](https://github.com/neo4j-contrib/mcp-neo4j/tree/main/servers/mcp-neo4j-cypher) server. This server adds vector search, fulltext search, and the innovative `search_cypher_query` tool for combining search with graph traversal.
 
@@ -15,6 +15,8 @@ This server enables LLMs to:
 - 📝 Search fulltext indexes with Lucene syntax
 - ⚡ Combine search with Cypher queries via `search_cypher_query`
 - 🕸️ Execute read-only Cypher queries
+- ✏️ Execute write Cypher queries (CREATE, MERGE, SET, DELETE)
+- 🖼️ Retrieve images stored in Neo4j nodes (multimodal — returns the image directly to the LLM)
 
 Built on [LiteLLM](https://docs.litellm.ai/) for multi-provider embedding support (OpenAI, Azure, Bedrock, Cohere, etc.).
 
@@ -70,6 +72,8 @@ Edit `~/.cursor/mcp.json` or `.cursor/mcp.json` in your project. Use the same co
 
 ## Tools
 
+The examples below use the [Neo4j demo `recommendations` database](https://demo.neo4jlabs.com) (movies, actors, directors), which is the same database referenced in the Configuration section above.
+
 ### `get_neo4j_schema_and_indexes`
 
 Discover the graph schema, vector indexes, and fulltext indexes.
@@ -83,7 +87,9 @@ Discover the graph schema, vector indexes, and fulltext indexes.
 
 Semantic similarity search using embeddings.
 
-**Parameters:** `text_query`, `vector_index`, `top_k`, `return_properties`
+**Parameters:** `text_query`, `vector_index`, `top_k`, `return_properties`, `pre_filter`
+
+Use `pre_filter` to restrict results to nodes matching exact property values (e.g. `{"genre": "Drama"}`).
 
 **Example prompt:**
 > "What movies are about artificial intelligence?"
@@ -95,7 +101,7 @@ Keyword search with Lucene syntax (AND, OR, wildcards, fuzzy).
 **Parameters:** `text_query`, `fulltext_index`, `top_k`, `return_properties`
 
 **Example prompt:**
-> "find people named Tom"
+> "Find movies with 'space' or 'galaxy' in the title or plot"
 
 ### `read_neo4j_cypher`
 
@@ -113,7 +119,27 @@ Combine vector/fulltext search with Cypher queries. Use `$vector_embedding` and 
 **Parameters:** `cypher_query`, `vector_query`, `fulltext_query`, `params`
 
 **Example prompt:**
-> "In one query, what are the directors and genres of the movies about 'time travel adventure' "
+> "In one query, what are the directors and genres of the movies about 'time travel adventure'?"
+
+### `write_neo4j_cypher`
+
+Execute write Cypher queries (CREATE, MERGE, SET, DELETE, etc.). Returns a summary of counters (nodes created, properties set, etc.).
+
+**Parameters:** `query`, `params`
+
+**Example prompt:**
+> "Add a user rating of 4.5 for the movie 'Inception'"
+
+### `read_node_image`
+
+Retrieve a base64-encoded image stored on a Neo4j node and return it as an inline image. Useful for graph databases that store page scans, diagrams, or photos directly on nodes. The LLM receives both the image and selected node properties, enabling visual analysis of graph-stored content.
+
+**Parameters:** `node_element_id`, `image_property`, `mime_type`, `return_properties`
+
+> **Note:** This tool requires a database that stores images directly on nodes (as base64). The demo `recommendations` database does not — it stores external poster URLs instead. See [docs/ADVANCED.md](docs/ADVANCED.md) for a full example using a document graph where page images are embedded on nodes.
+
+**Example prompt:**
+> "Show me page 3 of the AbbVie pipeline document and describe what you see"
 
 ## Environment Variables
 
@@ -142,7 +168,7 @@ Set `EMBEDDING_MODEL` and the corresponding API key:
 See [docs/ADVANCED.md](docs/ADVANCED.md) for:
 - Comparison with Neo4j Labs `mcp-neo4j-cypher` server
 - Production features (output sanitization, token limits)
-- Detailed tool documentation
+- Detailed tool documentation including `write_neo4j_cypher`, `read_node_image`, and `vector_search` filtering
 
 ## License
 

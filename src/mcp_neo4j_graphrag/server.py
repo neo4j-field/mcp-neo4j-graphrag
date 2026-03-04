@@ -3,23 +3,26 @@ import logging
 from typing import Any, Literal, Optional
 
 import litellm
+from dotenv import load_dotenv
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
 from fastmcp.tools.tool import TextContent, ToolResult
-from mcp.types import ToolAnnotations
+from mcp.types import ImageContent, ToolAnnotations
 from neo4j import AsyncDriver, AsyncGraphDatabase, Query, RoutingControl
 from neo4j.exceptions import ClientError, Neo4jError
 from pydantic import Field
 
 from .utils import (
-    _is_write_query, 
-    _value_sanitize, 
+    _is_write_query,
+    _value_sanitize,
     _truncate_string_to_tokens,
     _truncate_results_to_token_limit,
     MAX_LIST_SIZE,
     MAX_STRING_SIZE,
     RESPONSE_TOKEN_LIMIT,
 )
+
+load_dotenv()
 
 logger = logging.getLogger("mcp_neo4j_graphrag")
 
@@ -303,29 +306,37 @@ def create_mcp_server(
             None,
             description='Optional: Comma-separated list of properties to return (e.g., "pageNumber,id"). If not specified, returns all properties with automatic sanitization (large values are truncated).'
         ),
+        pre_filter: Optional[dict] = Field(
+            None,
+            description='Optional: Filter map applied after vector search (e.g., {"documentName": "foo.pdf"}). Filters results by exact property match. Check get_neo4j_schema_and_indexes for available node properties.'
+        ),
     ) -> list[ToolResult]:
         """
         Performs vector similarity search on a Neo4j vector index.
-        
+
         This tool embeds your text query using OpenAI and searches the specified vector index.
         Returns node IDs, labels, node properties (automatically sanitized), and similarity scores.
-        
+
         **Automatic Sanitization (always applied):**
         - Embedding property used by the vector index → automatically excluded (vector_search only)
         - Large lists (≥128 items) → replaced with placeholders
         - Large strings (≥10K chars) → truncated with suffix
         - Total response limited to 8000 tokens (results dropped if needed)
-        
+
         **Property Selection:**
         - Default (no return_properties): Returns ALL properties (sanitized)
         - With return_properties: Returns ONLY specified properties
         - Example: return_properties="pageNumber,id" → returns only these two
         - Check get_neo4j_schema_and_indexes for property warnings to avoid large fields
-        
+
+        **Post-Filtering:**
+        - Use pre_filter to filter results by exact property match after vector scoring (e.g., {"documentName": "foo.pdf"})
+        - Check get_neo4j_schema_and_indexes for available node properties to filter on
+
         **Performance Optimization:**
         Internally fetches max(top_k × 2, 100) results to avoid local maximum problems in kANN algorithms.
         """
-        logger.info(f"Running `vector_search` with query='{text_query}', index='{vector_index}', top_k={top_k}, return_properties={return_properties}")
+        logger.info(f"Running `vector_search` with query='{text_query}', index='{vector_index}', top_k={top_k}, return_properties={return_properties}, pre_filter={pre_filter}")
 
         try:
             # Get the embedding property name from the vector index
@@ -369,19 +380,37 @@ def create_mcp_server(
                 logger.debug(f"Parsed return_properties: {property_list}")
 
             # Build RETURN clause based on return_properties
+            search_params: dict[str, Any] = {
+                "index_name": vector_index,
+                "fetch_k": fetch_k,
+                "top_k": top_k,
+                "query_vector": query_embedding,
+            }
+
+            call_clause = "CALL db.index.vector.queryNodes($index_name, $fetch_k, $query_vector)"
+
+            where_clause = ""
+            if pre_filter:
+                conditions = " AND ".join([f"node.{k} = $pf_{k}" for k in pre_filter.keys()])
+                where_clause = f"WHERE {conditions}"
+                for k, v in pre_filter.items():
+                    search_params[f"pf_{k}"] = v
+
             if property_list:
                 props_return = ", ".join([f"node.{prop} as {prop}" for prop in property_list])
                 search_query = f"""
-                CALL db.index.vector.queryNodes($index_name, $fetch_k, $query_vector)
+                {call_clause}
                 YIELD node, score
+                {where_clause}
                 RETURN elementId(node) as nodeId, labels(node) as labels, {props_return}, score
                 ORDER BY score DESC
                 LIMIT $top_k
                 """
             else:
-                search_query = """
-                CALL db.index.vector.queryNodes($index_name, $fetch_k, $query_vector)
+                search_query = f"""
+                {call_clause}
                 YIELD node, score
+                {where_clause}
                 RETURN elementId(node) as nodeId, labels(node) as labels, properties(node) as properties, score
                 ORDER BY score DESC
                 LIMIT $top_k
@@ -389,12 +418,7 @@ def create_mcp_server(
 
             results = await neo4j_driver.execute_query(
                 search_query,
-                parameters_={
-                    "index_name": vector_index,
-                    "fetch_k": fetch_k,
-                    "top_k": top_k,
-                    "query_vector": query_embedding
-                },
+                parameters_=search_params,
                 routing_control=RoutingControl.READ,
                 database_=database,
                 result_transformer_=lambda r: r.data(),
@@ -655,6 +679,49 @@ def create_mcp_server(
             logger.error(f"Error executing read query: {e}\n{query}\n{params}")
             raise ToolError(f"Error: {e}\n{query}\n{params}")
 
+    @mcp.tool(
+        name=namespace_prefix + "write_neo4j_cypher",
+        annotations=ToolAnnotations(
+            title="Write Neo4j Cypher",
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
+    async def write_neo4j_cypher(
+        query: str = Field(..., description="The write Cypher query to execute (CREATE, MERGE, SET, DELETE, etc.)."),
+        params: dict[str, Any] = Field(
+            dict(), description="The parameters to pass to the Cypher query."
+        ),
+    ) -> list[ToolResult]:
+        """Execute a write Cypher query on the Neo4j database and return the result summary (counters)."""
+
+        try:
+            eager_result = await neo4j_driver.execute_query(
+                query,
+                parameters_=params,
+                routing_control=RoutingControl.WRITE,
+                database_=database,
+            )
+
+            counters = vars(eager_result.summary.counters)
+            summary = {
+                "counters": counters,
+                "result_available_after_ms": eager_result.summary.result_available_after,
+            }
+
+            logger.debug(f"Write query executed. Counters: {counters}")
+            return ToolResult(content=[TextContent(type="text", text=json.dumps(summary, default=str))])
+
+        except Neo4jError as e:
+            logger.error(f"Neo4j Error executing write query: {e}\n{query}\n{params}")
+            raise ToolError(f"Neo4j Error: {e}\n{query}\n{params}")
+
+        except Exception as e:
+            logger.error(f"Error executing write query: {e}\n{query}\n{params}")
+            raise ToolError(f"Error: {e}\n{query}\n{params}")
+
     # ========================================
     # SEARCH + CYPHER TOOL (NEW!)
     # ========================================
@@ -765,6 +832,100 @@ def create_mcp_server(
 
         except Exception as e:
             logger.error(f"Error executing search cypher query: {e}\n{cypher_query}")
+            raise ToolError(f"Error: {e}")
+
+    @mcp.tool(
+        name=namespace_prefix + "read_node_image",
+        annotations=ToolAnnotations(
+            title="Read Node Image",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
+    async def read_node_image(
+        node_element_id: str = Field(..., description="The elementId of the node to read."),
+        image_property: Optional[str] = Field(
+            None,
+            description='Property name holding the base64-encoded image. Defaults to "imageBase64".'
+        ),
+        mime_type: Optional[str] = Field(
+            None,
+            description='Override MIME type (e.g., "image/jpeg"). If not provided, reads from node\'s imageMimeType property, falling back to "image/png".'
+        ),
+        return_properties: Optional[str] = Field(
+            None,
+            description='Optional: Comma-separated list of additional text properties to return alongside the image. If not specified, returns all properties (sanitized, excluding the image property).'
+        ),
+    ) -> list[ToolResult]:
+        """
+        Retrieve a base64 image stored on a Neo4j node, plus selected text properties.
+
+        Returns a mixed ToolResult with TextContent (node properties) and ImageContent (the image).
+        The image property itself is excluded from the text content to avoid duplication.
+
+        **Usage:**
+        - node_element_id: get from vector_search/fulltext_search/read_neo4j_cypher (nodeId field)
+        - image_property: property storing the base64 image (default: "imageBase64")
+        - mime_type: override detected MIME type (default: read from node's imageMimeType, else "image/png")
+        - return_properties: comma-separated list of properties to include in text response
+        """
+        img_prop = image_property or "imageBase64"
+        logger.info(f"Running `read_node_image` for node {node_element_id}, image_property={img_prop}")
+
+        try:
+            rows = await neo4j_driver.execute_query(
+                "MATCH (n) WHERE elementId(n) = $id RETURN labels(n) as labels, properties(n) as props",
+                parameters_={"id": node_element_id},
+                routing_control=RoutingControl.READ,
+                database_=database,
+                result_transformer_=lambda r: r.data(),
+            )
+
+            if not rows:
+                raise ToolError(f"Node with elementId '{node_element_id}' not found.")
+
+            row = rows[0]
+            labels = row["labels"]
+            props: dict[str, Any] = row["props"]
+
+            # Extract image data
+            image_b64 = props.get(img_prop)
+            if not image_b64:
+                raise ToolError(f"Property '{img_prop}' not found or empty on node {node_element_id}.")
+
+            # Determine MIME type
+            effective_mime = mime_type or props.get("imageMimeType") or "image/png"
+
+            # Build text content
+            text_props: dict[str, Any] = {"nodeId": node_element_id, "labels": labels}
+            if return_properties:
+                property_list = [p.strip() for p in return_properties.split(",")]
+                for p in property_list:
+                    if p in props:
+                        text_props[p] = props[p]
+            else:
+                # Return all props sanitized, excluding image property
+                filtered = {k: v for k, v in props.items() if k != img_prop}
+                text_props.update(_value_sanitize(filtered, MAX_LIST_SIZE, MAX_STRING_SIZE))
+
+            text_json = json.dumps(text_props, default=str)
+
+            return ToolResult(content=[
+                TextContent(type="text", text=text_json),
+                ImageContent(type="image", data=image_b64, mimeType=effective_mime),
+            ])
+
+        except ToolError:
+            raise
+
+        except Neo4jError as e:
+            logger.error(f"Neo4j Error reading node image: {e}")
+            raise ToolError(f"Neo4j Error: {e}")
+
+        except Exception as e:
+            logger.error(f"Error reading node image: {e}")
             raise ToolError(f"Error: {e}")
 
     return mcp

@@ -12,10 +12,12 @@ This server extends the functionality of the [Neo4j Labs `mcp-neo4j-cypher`](htt
 |---------|---------------------------|----------------------------|
 | Schema discovery | `get_neo4j_schema` | `get_neo4j_schema_and_indexes` ✨ |
 | Read Cypher | ✅ | ✅ |
-| Write Cypher | ✅ | ❌ (read-only) |
+| Write Cypher | ✅ | ✅ `write_neo4j_cypher` |
 | Vector search | ❌ | ✅ `vector_search` |
+| Vector search with filter | ❌ | ✅ `vector_search` + `pre_filter` |
 | Fulltext search | ❌ | ✅ `fulltext_search` |
 | Search + Cypher | ❌ | ✅ `search_cypher_query` |
+| Image retrieval (multimodal) | ❌ | ✅ `read_node_image` |
 | Multi-provider embeddings | ❌ | ✅ (via LiteLLM) |
 | Property size warnings | ❌ | ✅ |
 
@@ -126,8 +128,21 @@ Returns:
 | `vector_index` | Yes | - | Name of vector index |
 | `top_k` | No | 5 | Number of results |
 | `return_properties` | No | all | Comma-separated property names |
+| `pre_filter` | No | None | Dict of property→value pairs to filter results (e.g. `{"documentName": "report.pdf"}`) |
 
 **Performance:** Fetches `max(top_k × 2, 100)` results internally to avoid kANN local maximum issues.
+
+**Filtering:** `pre_filter` applies exact-match WHERE conditions after the vector search. Useful for scoping results to a specific document, category, or any indexed property. Example:
+
+```python
+vector_search(
+    text_query="clinical trial results",
+    vector_index="chunk_text_embedding",
+    top_k=5,
+    return_properties="id,pageNumber,text",
+    pre_filter={"documentName": "AbbVie-Pipeline-2024.pdf"}
+)
+```
 
 ### `fulltext_search`
 
@@ -151,6 +166,28 @@ Returns:
 | `query` | Yes | - | Cypher query (read-only) |
 | `params` | No | {} | Query parameters |
 
+### `write_neo4j_cypher`
+
+Execute write Cypher queries and return a summary of the changes made.
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `query` | Yes | - | Write Cypher query (CREATE, MERGE, SET, DELETE, etc.) |
+| `params` | No | {} | Query parameters |
+
+**Returns:** JSON object with:
+- `counters` — change summary (nodes_created, relationships_created, properties_set, nodes_deleted, etc.)
+- `result_available_after_ms` — query execution time
+
+**Example:**
+```python
+write_neo4j_cypher(
+    query="MERGE (m:Movie {title: $title}) SET m.year = $year",
+    params={"title": "Inception", "year": 2010}
+)
+# → {"counters": {"nodes_created": 1, "properties_set": 2, ...}, "result_available_after_ms": 3}
+```
+
 ### `search_cypher_query`
 
 | Parameter | Required | Default | Description |
@@ -159,6 +196,47 @@ Returns:
 | `vector_query` | No | - | Text to embed (use `$vector_embedding` in Cypher) |
 | `fulltext_query` | No | - | Text for fulltext (use `$fulltext_text` in Cypher) |
 | `params` | No | {} | Additional parameters |
+
+### `read_node_image`
+
+Retrieve a base64-encoded image stored on a Neo4j node and return it as an inline image alongside selected node properties. This enables multimodal analysis: the LLM receives the actual image and can reason about its visual content in relation to the graph data.
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `node_element_id` | Yes | - | Element ID of the node (from search results) |
+| `image_property` | No | `imageBase64` | Property containing the base64 image |
+| `mime_type` | No | from node | Override MIME type (e.g. `image/jpeg`). Falls back to node's `imageMimeType` property, then `image/png` |
+| `return_properties` | No | all (excl. image) | Comma-separated text properties to return alongside the image |
+
+**Returns:** Mixed result with text content (node properties as JSON) + image content (the decoded image).
+
+**Typical workflow:**
+
+1. Run `get_neo4j_schema_and_indexes` — identify nodes with `imageBase64` / `imageMimeType` properties (look for `warning: very large` on those fields)
+2. Run `vector_search` or `read_neo4j_cypher` to find the target node and get its `nodeId`
+3. Call `read_node_image` with that `nodeId`
+
+**Example:**
+```python
+# Step 1: find the node
+results = vector_search(
+    text_query="oncology pipeline slide",
+    vector_index="chunk_text_embedding",
+    top_k=1,
+    return_properties="id,documentName,pageNumber"
+)
+node_id = results[0]["nodeId"]  # e.g. "4:abc123:1124"
+
+# Step 2: retrieve the image
+read_node_image(
+    node_element_id=node_id,
+    return_properties="id,documentName,pageNumber,textDescription"
+)
+```
+
+**Use case — visual information not captured in text:**
+
+Graph databases built from PDF parsing often store both extracted text and the original page image. The extracted text may miss visual encoding like color coding, chart values, or layout structure that is only visible in the image. `read_node_image` lets the LLM see the original visual directly and reason about what the text extraction lost.
 
 ---
 
