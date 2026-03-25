@@ -24,7 +24,7 @@ dependencies = [
     "neo4j>=5.26.0",
     "pydantic>=2.10.1",
     "tiktoken>=0.11.0",
-    "litellm>=1.50.0",
+    "litellm>=1.50.0,!=1.82.7,!=1.82.8",
     "python-dotenv>=1.0.0",
 ]
 
