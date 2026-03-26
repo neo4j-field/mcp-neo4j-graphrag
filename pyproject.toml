@@ -1,6 +1,6 @@
 [project]
 name = "mcp-neo4j-graphrag"
-version = "0.4.0"
+version = "0.4.1"
 description = "A unified Neo4j MCP server for GraphRAG: vector search, fulltext search, search-augmented Cypher queries, write operations, and multimodal image retrieval"
 readme = "README.md"
 license = {text = "MIT"}
