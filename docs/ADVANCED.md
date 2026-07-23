@@ -128,7 +128,7 @@ Returns:
 | `vector_index` | Yes | - | Name of vector index |
 | `top_k` | No | 5 | Number of results |
 | `return_properties` | No | all | Comma-separated property names |
-| `pre_filter` | No | None | Dict of property→value pairs to filter results (e.g. `{"documentName": "report.pdf"}`) |
+| `pre_filter` | No | `null` | Property→value pairs encoded as a JSON object string (e.g. `'{"documentName": "report.pdf"}'`) |
 
 **Performance:** Fetches `max(top_k × 2, 100)` results internally to avoid kANN local maximum issues.
 
@@ -140,7 +140,7 @@ vector_search(
     vector_index="chunk_text_embedding",
     top_k=5,
     return_properties="id,pageNumber,text",
-    pre_filter={"documentName": "AbbVie-Pipeline-2024.pdf"}
+    pre_filter='{"documentName": "AbbVie-Pipeline-2024.pdf"}'
 )
 ```
 
@@ -164,7 +164,7 @@ vector_search(
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `query` | Yes | - | Cypher query (read-only) |
-| `params` | No | {} | Query parameters |
+| `params` | No | `null` | Query parameters encoded as a JSON object string |
 
 ### `write_neo4j_cypher`
 
@@ -173,7 +173,7 @@ Execute write Cypher queries and return a summary of the changes made.
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `query` | Yes | - | Write Cypher query (CREATE, MERGE, SET, DELETE, etc.) |
-| `params` | No | {} | Query parameters |
+| `params` | No | `null` | Query parameters encoded as a JSON object string |
 
 **Returns:** JSON object with:
 - `counters` — change summary (nodes_created, relationships_created, properties_set, nodes_deleted, etc.)
@@ -183,7 +183,7 @@ Execute write Cypher queries and return a summary of the changes made.
 ```python
 write_neo4j_cypher(
     query="MERGE (m:Movie {title: $title}) SET m.year = $year",
-    params={"title": "Inception", "year": 2010}
+    params='{"title": "Inception", "year": 2010}'
 )
 # → {"counters": {"nodes_created": 1, "properties_set": 2, ...}, "result_available_after_ms": 3}
 ```
@@ -195,7 +195,7 @@ write_neo4j_cypher(
 | `cypher_query` | Yes | - | Cypher with `$vector_embedding` or `$fulltext_text` |
 | `vector_query` | No | - | Text to embed (use `$vector_embedding` in Cypher) |
 | `fulltext_query` | No | - | Text for fulltext (use `$fulltext_text` in Cypher) |
-| `params` | No | {} | Additional parameters |
+| `params` | No | `null` | Additional parameters encoded as a JSON object string |
 
 ### `read_node_image`
 

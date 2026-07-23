@@ -15,7 +15,6 @@ from pydantic import Field
 from .utils import (
     _is_write_query,
     _value_sanitize,
-    _truncate_string_to_tokens,
     _truncate_results_to_token_limit,
     MAX_LIST_SIZE,
     MAX_STRING_SIZE,
@@ -25,6 +24,18 @@ from .utils import (
 load_dotenv()
 
 logger = logging.getLogger("mcp_neo4j_graphrag")
+
+
+def _parse_json_object(value: Optional[str], field_name: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"{field_name} must be a valid JSON object: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise ToolError(f"{field_name} must decode to a JSON object")
+    return parsed
 
 
 def _format_namespace(namespace: str) -> str:
@@ -306,9 +317,9 @@ def create_mcp_server(
             None,
             description='Optional: Comma-separated list of properties to return (e.g., "pageNumber,id"). If not specified, returns all properties with automatic sanitization (large values are truncated).'
         ),
-        pre_filter: Optional[dict] = Field(
+        pre_filter: Optional[str] = Field(
             None,
-            description='Optional: Filter map applied after vector search (e.g., {"documentName": "foo.pdf"}). Filters results by exact property match. Check get_neo4j_schema_and_indexes for available node properties.'
+            description='Optional exact-match filters encoded as a JSON object, for example {"documentName": "foo.pdf"}.'
         ),
     ) -> list[ToolResult]:
         """
@@ -390,10 +401,11 @@ def create_mcp_server(
             call_clause = "CALL db.index.vector.queryNodes($index_name, $fetch_k, $query_vector)"
 
             where_clause = ""
-            if pre_filter:
-                conditions = " AND ".join([f"node.{k} = $pf_{k}" for k in pre_filter.keys()])
+            parsed_pre_filter = _parse_json_object(pre_filter, "Vector pre_filter")
+            if parsed_pre_filter:
+                conditions = " AND ".join([f"node.{k} = $pf_{k}" for k in parsed_pre_filter.keys()])
                 where_clause = f"WHERE {conditions}"
-                for k, v in pre_filter.items():
+                for k, v in parsed_pre_filter.items():
                     search_params[f"pf_{k}"] = v
 
             if property_list:
@@ -633,8 +645,8 @@ def create_mcp_server(
     )
     async def read_neo4j_cypher(
         query: str = Field(..., description="The Cypher query to execute."),
-        params: dict[str, Any] = Field(
-            dict(), description="The parameters to pass to the Cypher query."
+        params: Optional[str] = Field(
+            None, description='Optional Cypher parameters encoded as a JSON object, for example {"year": 2020}.'
         ),
     ) -> list[ToolResult]:
         """Execute a read Cypher query on the Neo4j database."""
@@ -646,7 +658,7 @@ def create_mcp_server(
             query_obj = Query(query, timeout=float(read_timeout))
             results = await neo4j_driver.execute_query(
                 query_obj,
-                parameters_=params,
+                parameters_=_parse_json_object(params, "Cypher params"),
                 routing_control=RoutingControl.READ,
                 database_=database,
                 result_transformer_=lambda r: r.data(),
@@ -691,8 +703,8 @@ def create_mcp_server(
     )
     async def write_neo4j_cypher(
         query: str = Field(..., description="The write Cypher query to execute (CREATE, MERGE, SET, DELETE, etc.)."),
-        params: dict[str, Any] = Field(
-            dict(), description="The parameters to pass to the Cypher query."
+        params: Optional[str] = Field(
+            None, description='Optional Cypher parameters encoded as a JSON object, for example {"year": 2020}.'
         ),
     ) -> list[ToolResult]:
         """Execute a write Cypher query on the Neo4j database and return the result summary (counters)."""
@@ -700,7 +712,7 @@ def create_mcp_server(
         try:
             eager_result = await neo4j_driver.execute_query(
                 query,
-                parameters_=params,
+                parameters_=_parse_json_object(params, "Cypher params"),
                 routing_control=RoutingControl.WRITE,
                 database_=database,
             )
@@ -740,7 +752,9 @@ def create_mcp_server(
         cypher_query: str = Field(..., description="Cypher query using $vector_embedding and/or $fulltext_text placeholders."),
         vector_query: Optional[str] = Field(None, description="Text query to embed for vector search. Use $vector_embedding placeholder in Cypher."),
         fulltext_query: Optional[str] = Field(None, description="Text query for fulltext search. Use $fulltext_text placeholder in Cypher."),
-        params: dict[str, Any] = Field(dict(), description="Additional parameters for the Cypher query."),
+        params: Optional[str] = Field(
+            None, description='Additional Cypher parameters encoded as a JSON object, for example {"year": 2020}.'
+        ),
     ) -> list[ToolResult]:
         """
         Execute a Cypher query that uses vector and/or fulltext search indexes.
@@ -782,7 +796,7 @@ def create_mcp_server(
 
         try:
             # Prepare parameters
-            query_params = dict(params)
+            query_params = _parse_json_object(params, "Cypher params")
 
             # Generate embedding if vector_query provided (using LiteLLM)
             if vector_query:
