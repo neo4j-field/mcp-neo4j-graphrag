@@ -87,7 +87,7 @@ Discover the graph schema, vector indexes, and fulltext indexes.
 
 Semantic similarity search using embeddings.
 
-**Parameters:** `text_query`, `vector_index`, `top_k`, `return_properties`, `pre_filter`
+**Parameters:** `text_query`, `vector_index`, `top_k`, `return_properties`, `pre_filter` (optional JSON object encoded as a string)
 
 Use `pre_filter` to restrict results to nodes matching exact property values (e.g. `{"genre": "Drama"}`).
 
@@ -107,7 +107,7 @@ Keyword search with Lucene syntax (AND, OR, wildcards, fuzzy).
 
 Execute read-only Cypher queries.
 
-**Parameters:** `query`, `params`
+**Parameters:** `query`, `params` (optional JSON object encoded as a string)
 
 **Example prompt:**
 > "Show me all genres and how many movies are in each"
@@ -116,7 +116,7 @@ Execute read-only Cypher queries.
 
 Combine vector/fulltext search with Cypher queries. Use `$vector_embedding` and `$fulltext_text` placeholders.
 
-**Parameters:** `cypher_query`, `vector_query`, `fulltext_query`, `params`
+**Parameters:** `cypher_query`, `vector_query`, `fulltext_query`, `params` (optional JSON object encoded as a string)
 
 **Example prompt:**
 > "In one query, what are the directors and genres of the movies about 'time travel adventure'?"
@@ -125,7 +125,7 @@ Combine vector/fulltext search with Cypher queries. Use `$vector_embedding` and 
 
 Execute write Cypher queries (CREATE, MERGE, SET, DELETE, etc.). Returns a summary of counters (nodes created, properties set, etc.).
 
-**Parameters:** `query`, `params`
+**Parameters:** `query`, `params` (optional JSON object encoded as a string)
 
 **Example prompt:**
 > "Add a user rating of 4.5 for the movie 'Inception'"
