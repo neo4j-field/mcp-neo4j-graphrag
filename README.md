@@ -90,6 +90,13 @@ The server returns evidence; the calling agent reasons about which sections to r
 | `get_section_content(document_id, section_id, include_descendants, ...)` | Read original section elements, with explicit source/page citations |
 | `get_document_content(document_id, ...)` | Read front matter, flat PDFs or a whole document incrementally |
 
+Document tools are advertised only when the connected database contains usable
+active lexical content. Outline/section tools additionally require section-to-element
+structure. A business-only or empty graph exposes none of these navigation tools.
+Availability is checked again whenever tools are listed and when a navigation tool
+is called. After ingesting or removing data, refresh the agent's tool list or
+reconnect if its client caches discovery results. Other GraphRAG tools remain available.
+
 Start with a document outline, choose a section, then read its content. Pass the
 returned `next.offset` and `next.text_offset` to continue; `next_offset` pages an
 outline or document list. A long element can span multiple calls without losing

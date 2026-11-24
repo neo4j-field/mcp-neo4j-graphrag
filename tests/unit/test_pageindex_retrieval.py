@@ -11,6 +11,7 @@ from mcp_neo4j_graphrag.pageindex import (
     _query,
     _content_page,
     _bounds,
+    CAPABILITIES,
 )
 from fastmcp.exceptions import ToolError
 
@@ -56,8 +57,15 @@ class RetrievalMCPTests(unittest.IsolatedAsyncioTestCase):
     async def call(self, name, arguments, responses):
         mcp = FastMCP("pageindex-tests")
         register_pageindex_tools(mcp, MagicMock(), "neo4j", "test-", 7)
+        response_iterator = iter(responses)
+
+        async def respond(*args, **kwargs):
+            if args[3] == CAPABILITIES:
+                return [{"documents": True, "sections": True}]
+            return next(response_iterator)
+
         with patch(
-            "mcp_neo4j_graphrag.pageindex._query", AsyncMock(side_effect=responses)
+            "mcp_neo4j_graphrag.pageindex._query", AsyncMock(side_effect=respond)
         ) as query:
             async with Client(mcp) as client:
                 result = await client.call_tool("test-" + name, arguments)
@@ -70,8 +78,11 @@ class RetrievalMCPTests(unittest.IsolatedAsyncioTestCase):
             [[{"document_id": "a"}, {"document_id": "b"}]],
         )
         self.assertEqual(1, result["next_offset"])
-        self.assertEqual("a* OR b", query.call_args.kwargs["query"])
-        self.assertNotIn("STARTS WITH", query.call_args.args[3])
+        discovery_call = next(
+            call for call in query.call_args_list if "query" in call.kwargs
+        )
+        self.assertEqual("a* OR b", discovery_call.kwargs["query"])
+        self.assertNotIn("STARTS WITH", discovery_call.args[3])
 
     async def test_outline_reports_paths_and_honest_heading_free_fallback(self):
         result, _ = await self.call(
@@ -93,7 +104,10 @@ class RetrievalMCPTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("s", result["section_path"][0]["section_id"])
         self.assertFalse(result["fallback_used"])
-        self.assertIn("HAS_SUBSECTION*0..32", query.call_args_list[2].args[3])
+        content_calls = [
+            call for call in query.call_args_list if call.args[3] != CAPABILITIES
+        ]
+        self.assertIn("HAS_SUBSECTION*0..32", content_calls[2].args[3])
 
     async def test_read_sessions_apply_timeout(self):
         session = AsyncMock()
@@ -114,3 +128,83 @@ class RetrievalMCPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {"query": "literal"}, session.run.call_args.kwargs["parameters"]
         )
+
+
+class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    def server(self):
+        server = FastMCP("dynamic-discovery")
+        register_pageindex_tools(server, MagicMock(), "neo4j", "poc-", 7)
+
+        @server.tool(name="other_tool")
+        async def other_tool() -> str:
+            return "available"
+
+        return server
+
+    async def test_same_client_sees_empty_business_flat_hierarchy_and_removal(self):
+        state = {"documents": False, "sections": False}
+
+        async def topology(*args, **kwargs):
+            self.assertEqual(CAPABILITIES, args[3])
+            return [dict(state)]
+
+        with patch(
+            "mcp_neo4j_graphrag.pageindex._query", AsyncMock(side_effect=topology)
+        ) as query:
+            async with Client(self.server()) as client:
+
+                async def names():
+                    return {tool.name for tool in await client.list_tools()}
+
+                self.assertEqual({"other_tool"}, await names())
+                # A business-only graph supplies no supported lexical topology.
+                self.assertEqual({"other_tool"}, await names())
+                state.update(documents=True)
+                core = {
+                    "other_tool",
+                    "poc-list_retrieval_documents",
+                    "poc-get_document_content",
+                }
+                self.assertEqual(core, await names())
+                # Flat sections suffice; HAS_SUBSECTION is not required.
+                state.update(sections=True)
+                structured = core | {
+                    "poc-get_document_outline",
+                    "poc-get_section_content",
+                }
+                self.assertEqual(structured, await names())
+                self.assertEqual(structured, await names())  # nested hierarchy
+                state.update(documents=False, sections=False)
+                self.assertEqual({"other_tool"}, await names())
+                with self.assertRaisesRegex(ToolError, "unavailable"):
+                    await client.call_tool(
+                        "poc-get_document_content", {"document_id": "deleted"}
+                    )
+                self.assertEqual(
+                    "available",
+                    (await client.call_tool("other_tool", {})).content[0].text,
+                )
+        self.assertGreaterEqual(query.await_count, 7)
+
+    async def test_probe_failure_hides_only_navigation_and_blocks_direct_calls(self):
+        from neo4j.exceptions import ServiceUnavailable
+
+        with patch(
+            "mcp_neo4j_graphrag.pageindex._query",
+            AsyncMock(side_effect=ServiceUnavailable("offline")),
+        ):
+            with self.assertLogs("mcp_neo4j_graphrag.pageindex", level="WARNING"):
+                async with Client(self.server()) as client:
+                    self.assertEqual(
+                        ["other_tool"], [t.name for t in await client.list_tools()]
+                    )
+                    with self.assertRaisesRegex(
+                        ToolError, "connectivity/read permissions"
+                    ):
+                        await client.call_tool(
+                            "poc-get_document_outline", {"document_id": "d"}
+                        )
+                    self.assertEqual(
+                        "available",
+                        (await client.call_tool("other_tool", {})).content[0].text,
+                    )

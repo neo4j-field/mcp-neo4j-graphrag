@@ -1,12 +1,17 @@
 """Bounded, model-free navigation of the workspace's existing lexical graph."""
 
+import logging
 from typing import Optional
 
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import Middleware
+from neo4j.exceptions import DriverError, Neo4jError
 from mcp.types import ToolAnnotations
 from neo4j import Query, READ_ACCESS
 from pydantic import Field
 
+
+logger = logging.getLogger(__name__)
 
 ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
@@ -92,6 +97,87 @@ RETURN e.id AS element_id, elementId(e) AS node_element_id, labels(e) AS labels,
  EXISTS { MATCH (e)<-[:HAS_ELEMENT]-(:Page) } AS physical_page_link
 ORDER BY i
 """
+
+
+CAPABILITIES = """
+RETURN EXISTS {
+ MATCH (d:Document) WHERE d.id IS NOT NULL AND coalesce(d.active,true)=true AND (
+   EXISTS { MATCH (d)-[:HAS_PAGE]->(:Page)-[:HAS_ELEMENT]->(e:Element) WHERE e.id IS NOT NULL AND (coalesce(e.text,'') <> '' OR coalesce(e.textDescription,'') <> '' OR coalesce(e.imageBase64,'') <> '') }
+   OR EXISTS { MATCH (d)-[:HAS_ELEMENT]->(e:Element) WHERE e.id IS NOT NULL AND (coalesce(e.text,'') <> '' OR coalesce(e.textDescription,'') <> '' OR coalesce(e.imageBase64,'') <> '') }
+   OR EXISTS { MATCH (d)-[:HAS_SECTION]->(:Section)-[:HAS_ELEMENT]->(e:Element) WHERE e.id IS NOT NULL AND (coalesce(e.text,'') <> '' OR coalesce(e.textDescription,'') <> '' OR coalesce(e.imageBase64,'') <> '') }
+   OR EXISTS { MATCH (c:Chunk)-[:PART_OF]->(d)
+               WHERE c.id IS NOT NULL AND coalesce(c.active,true)=true
+                 AND (coalesce(c.text,'') <> '' OR coalesce(c.textDescription,'') <> '') }
+   OR EXISTS { MATCH (d)-[:HAS_PAGE]->(p:Page)
+               WHERE p.id IS NOT NULL AND (coalesce(p.text,'') <> '' OR coalesce(p.textDescription,'') <> '')
+                 AND (d.parseMode='page_image' OR NOT EXISTS {
+                   MATCH (c:Chunk)-[:PART_OF]->(d) WHERE coalesce(c.active,true)=true }) }
+ )
+} AS documents,
+EXISTS {
+ MATCH (d:Document)-[:HAS_SECTION]->(s:Section)-[:HAS_ELEMENT]->(e:Element)
+ WHERE d.id IS NOT NULL AND s.id IS NOT NULL AND e.id IS NOT NULL
+   AND (coalesce(e.text,'') <> '' OR coalesce(e.textDescription,'') <> '' OR coalesce(e.imageBase64,'') <> '')
+   AND coalesce(d.active,true)=true
+} AS sections
+"""
+
+
+class _PageIndexDiscovery(Middleware):
+    """Reevaluate actual lexical topology on every discovery and navigation call."""
+
+    def __init__(self, driver, database, prefix, timeout):
+        self.driver, self.database, self.timeout = driver, database, timeout
+        self.document_tools = {
+            prefix + name
+            for name in ("list_retrieval_documents", "get_document_content")
+        }
+        self.section_tools = {
+            prefix + name for name in ("get_document_outline", "get_section_content")
+        }
+        self.navigation_tools = self.document_tools | self.section_tools
+
+    async def enabled(self):
+        try:
+            rows = await _query(self.driver, self.database, self.timeout, CAPABILITIES)
+        except (Neo4jError, DriverError) as exc:
+            logger.warning(
+                "Cannot inspect lexical graph tool availability; hiding navigation tools: %s",
+                exc,
+            )
+            return set()
+        if len(rows) != 1 or not all(
+            key in rows[0] for key in ("documents", "sections")
+        ):
+            logger.warning(
+                "Lexical graph availability query returned an unexpected result; hiding navigation tools"
+            )
+            return set()
+        enabled = set()
+        if rows[0]["documents"]:
+            enabled.update(self.document_tools)
+        if rows[0]["sections"]:
+            enabled.update(self.section_tools)
+        return enabled
+
+    async def on_list_tools(self, context, call_next):
+        tools = await call_next(context)
+        enabled = await self.enabled()
+        return [
+            tool
+            for tool in tools
+            if tool.name not in self.navigation_tools or tool.name in enabled
+        ]
+
+    async def on_call_tool(self, context, call_next):
+        name = context.message.name
+        if name in self.navigation_tools and name not in await self.enabled():
+            raise ToolError(
+                "This navigation tool is unavailable: supported active document/section topology "
+                "could not be established. Check database connectivity/read permissions or ingest "
+                "lexical data, then list tools again."
+            )
+        return await call_next(context)
 
 
 def _bounds(offset, limit, maximum, text_offset=0, max_chars=12000):
@@ -186,6 +272,10 @@ def _content_page(rows, document, offset, text_offset, limit, max_chars):
 def register_pageindex_tools(
     mcp, driver, database, namespace_prefix="", read_timeout=30
 ):
+    mcp.add_middleware(
+        _PageIndexDiscovery(driver, database, namespace_prefix, read_timeout)
+    )
+
     @mcp.tool(
         name=namespace_prefix + "list_retrieval_documents", annotations=ANNOTATIONS
     )

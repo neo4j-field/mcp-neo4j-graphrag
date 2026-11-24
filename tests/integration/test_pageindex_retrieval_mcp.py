@@ -162,3 +162,108 @@ class PageIndexRetrievalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(
             result["items"][0]["document_id"], next_page["items"][0]["document_id"]
         )
+
+
+@unittest.skipUnless(
+    os.getenv("NEO4J_MCP_RUN_INTEGRATION") == "1", "opt-in disposable graph test"
+)
+class PageIndexVisibilityIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_visibility_tracks_actual_topology_without_restarting_client(self):
+        driver = AsyncGraphDatabase.driver(
+            os.environ["NEO4J_URI"],
+            auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
+        )
+        database = os.getenv("NEO4J_DATABASE", "neo4j")
+        run_id = uuid4().hex
+
+        async def write(statement):
+            async with driver.session(database=database) as session:
+                await session.run(statement, run=run_id)
+
+        server = FastMCP("visibility-integration")
+        register_pageindex_tools(server, driver, database, "poc-", 7)
+
+        @server.tool(name="other_tool")
+        async def other_tool() -> str:
+            return "available"
+
+        try:
+            async with Client(server) as client:
+
+                async def names():
+                    return {tool.name for tool in await client.list_tools()}
+
+                self.assertEqual({"other_tool"}, await names())
+                await write("CREATE (:Product {id:$run,testRunId:$run})")
+                self.assertEqual({"other_tool"}, await names())
+                await write(
+                    "CREATE (:Document {id:$run,active:true,parseMode:'page_image',testRunId:$run})"
+                )
+                self.assertEqual({"other_tool"}, await names())
+                await write(
+                    "MATCH (d:Document {id:$run}) CREATE (shell:Section {id:$run+'-shell',testRunId:$run}), (empty:Element {id:$run+'-empty-element',testRunId:$run}), (d)-[:HAS_SECTION]->(shell),(shell)-[:HAS_ELEMENT]->(empty)"
+                )
+                self.assertEqual({"other_tool"}, await names())
+                await write(
+                    "MATCH (e:Element {id:$run+'-empty-element'}) SET e.text='Now readable'"
+                )
+                self.assertEqual(
+                    {
+                        "other_tool",
+                        "poc-list_retrieval_documents",
+                        "poc-get_document_content",
+                        "poc-get_document_outline",
+                        "poc-get_section_content",
+                    },
+                    await names(),
+                )
+                await write(
+                    "MATCH (e:Element {id:$run+'-empty-element'}) REMOVE e.text SET e.imageBase64='image-fixture'"
+                )
+                self.assertEqual(
+                    {
+                        "other_tool",
+                        "poc-list_retrieval_documents",
+                        "poc-get_document_content",
+                        "poc-get_document_outline",
+                        "poc-get_section_content",
+                    },
+                    await names(),
+                )
+                await write(
+                    "MATCH (n {testRunId:$run}) WHERE n:Section OR n:Element DETACH DELETE n"
+                )
+                await write(
+                    "MATCH (d:Document {id:$run}) CREATE (p:Page {id:$run+'-page',active:true,textDescription:'Visible slide',testRunId:$run}), (d)-[:HAS_PAGE]->(p)"
+                )
+                core = {
+                    "other_tool",
+                    "poc-list_retrieval_documents",
+                    "poc-get_document_content",
+                }
+                self.assertEqual(core, await names())
+                await write(
+                    "MATCH (d:Document {id:$run}) CREATE (s:Section {id:$run+'-section',testRunId:$run}), (e:Element {id:$run+'-element',text:'Flat content',testRunId:$run}), (d)-[:HAS_SECTION]->(s),(s)-[:HAS_ELEMENT]->(e)"
+                )
+                structured = core | {
+                    "poc-get_document_outline",
+                    "poc-get_section_content",
+                }
+                self.assertEqual(structured, await names())
+                await write(
+                    "MATCH (d:Document {id:$run})-[:HAS_SECTION]->(s:Section) CREATE (child:Section {id:$run+'-child',testRunId:$run}), (d)-[:HAS_SECTION]->(child),(s)-[:HAS_SUBSECTION]->(child)"
+                )
+                self.assertEqual(structured, await names())
+                await write("MATCH (d:Document {id:$run}) SET d.active=false")
+                self.assertEqual({"other_tool"}, await names())
+                with self.assertRaisesRegex(ToolError, "unavailable"):
+                    await client.call_tool(
+                        "poc-get_document_content", {"document_id": run_id}
+                    )
+                await write("MATCH (d:Document {id:$run}) SET d.active=true")
+                self.assertEqual(structured, await names())
+                await write("MATCH (n {testRunId:$run}) DETACH DELETE n")
+                self.assertEqual({"other_tool"}, await names())
+        finally:
+            await write("MATCH (n {testRunId:$run}) DETACH DELETE n")
+            await driver.close()

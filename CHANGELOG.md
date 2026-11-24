@@ -5,6 +5,7 @@
 - Add bounded document discovery, outline drilldown and section/document reads with citations and resumable text pagination.
 - Add `get_ontology` with file/template-DB sources, semantic selection and compact context for text-to-Cypher.
 - Add optional ontology CLI/environment configuration; existing schema/search tools remain available.
+- Advertise navigation tools only when the connected database has usable active lexical structure; recheck availability on discovery and calls.
 
 ## [0.4.0] - 2026-03-04
 
