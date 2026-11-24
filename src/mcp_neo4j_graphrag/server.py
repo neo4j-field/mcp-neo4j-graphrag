@@ -12,6 +12,9 @@ from neo4j import AsyncDriver, AsyncGraphDatabase, Query, RoutingControl
 from neo4j.exceptions import ClientError, Neo4jError
 from pydantic import Field
 
+from .pageindex import register_pageindex_tools
+from .ontology import register_ontology_tools
+
 from .utils import (
     _is_write_query,
     _value_sanitize,
@@ -41,11 +44,21 @@ def create_mcp_server(
     namespace: str = "",
     read_timeout: int = 30,
     config_sample_size: int = 1000,
+    ontology_path: Optional[str] = None,
+    ontology_name: Optional[str] = None,
+    ontology_driver: Optional[AsyncDriver] = None,
+    ontology_database: Optional[str] = None,
 ) -> FastMCP:
     """Create the unified GraphRAG MCP server."""
     
     mcp: FastMCP = FastMCP("mcp-neo4j-graphrag")
     namespace_prefix = _format_namespace(namespace)
+    register_pageindex_tools(mcp, neo4j_driver, database, namespace_prefix, read_timeout)
+    register_ontology_tools(
+        mcp, neo4j_driver, database, namespace_prefix, read_timeout,
+        ontology_path=ontology_path, ontology_name=ontology_name,
+        ontology_driver=ontology_driver, ontology_database=ontology_database,
+    )
 
     # ========================================
     # DISCOVERY TOOL
@@ -944,6 +957,12 @@ async def main(
     path: str = "/mcp/",
     read_timeout: int = 30,
     schema_sample_size: int = 1000,
+    ontology_file: Optional[str] = None,
+    ontology_name: Optional[str] = None,
+    ontology_db_url: Optional[str] = None,
+    ontology_username: Optional[str] = None,
+    ontology_password: Optional[str] = None,
+    ontology_database: Optional[str] = None,
 ) -> None:
     """Main entry point for the Neo4j GraphRAG MCP Server."""
     logger.info("Starting Neo4j GraphRAG MCP Server")
@@ -951,6 +970,12 @@ async def main(
 
     neo4j_driver = AsyncGraphDatabase.driver(db_url, auth=(username, password))
 
+    ontology_driver = (
+        AsyncGraphDatabase.driver(
+            ontology_db_url,
+            auth=(ontology_username or username, ontology_password or password),
+        ) if ontology_db_url else neo4j_driver
+    )
     mcp = create_mcp_server(
         neo4j_driver=neo4j_driver,
         embedding_model=embedding_model,
@@ -958,21 +983,29 @@ async def main(
         namespace=namespace,
         read_timeout=read_timeout,
         config_sample_size=schema_sample_size,
+        ontology_path=ontology_file, ontology_name=ontology_name,
+        ontology_driver=ontology_driver, ontology_database=ontology_database,
     )
 
-    match transport:
-        case "http":
-            logger.info(f"Running Neo4j GraphRAG MCP Server with HTTP transport on {host}:{port}...")
-            await mcp.run_http_async(host=host, port=port, path=path)
-        case "stdio":
-            logger.info("Running Neo4j GraphRAG MCP Server with stdio transport...")
-            await mcp.run_stdio_async()
-        case "sse":
-            logger.info(f"Running Neo4j GraphRAG MCP Server with SSE transport on {host}:{port}...")
-            await mcp.run_http_async(host=host, port=port, path=path, transport="sse")
-        case _:
-            logger.error(f"Invalid transport: {transport}")
-            raise ValueError(f"Invalid transport: {transport} | Must be 'stdio', 'sse', or 'http'")
+    try:
+        match transport:
+            case "http":
+                logger.info(f"Running Neo4j GraphRAG MCP Server with HTTP transport on {host}:{port}...")
+                await mcp.run_http_async(host=host, port=port, path=path)
+            case "stdio":
+                logger.info("Running Neo4j GraphRAG MCP Server with stdio transport...")
+                await mcp.run_stdio_async()
+            case "sse":
+                logger.info(f"Running Neo4j GraphRAG MCP Server with SSE transport on {host}:{port}...")
+                await mcp.run_http_async(host=host, port=port, path=path, transport="sse")
+            case _:
+                logger.error(f"Invalid transport: {transport}")
+                raise ValueError(f"Invalid transport: {transport} | Must be 'stdio', 'sse', or 'http'")
+
+    finally:
+        if ontology_driver is not neo4j_driver:
+            await ontology_driver.close()
+        await neo4j_driver.close()
 
 
 if __name__ == "__main__":

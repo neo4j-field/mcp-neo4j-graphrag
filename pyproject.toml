@@ -26,6 +26,8 @@ dependencies = [
     "tiktoken>=0.11.0",
     "litellm>=1.50.0,<1.92,!=1.82.7,!=1.82.8",
     "python-dotenv>=1.0.0",
+    "jsonschema>=4.18,<5",
+    "PyYAML>=6.0,<7",
 ]
 
 [project.urls]
