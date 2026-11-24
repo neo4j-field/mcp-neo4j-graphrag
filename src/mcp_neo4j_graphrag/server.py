@@ -12,6 +12,7 @@ from neo4j import AsyncDriver, AsyncGraphDatabase, Query, RoutingControl
 from neo4j.exceptions import ClientError, Neo4jError
 from pydantic import Field
 
+from .search_indexes import search_source
 from .pageindex import register_pageindex_tools
 from .ontology import register_ontology_tools
 
@@ -321,7 +322,7 @@ def create_mcp_server(
         ),
         pre_filter: Optional[dict] = Field(
             None,
-            description='Optional: Filter map applied after vector search (e.g., {"documentName": "foo.pdf"}). Filters results by exact property match. Check get_neo4j_schema_and_indexes for available node properties.'
+            description='Optional: Filter map applied in-index when supported and indexed, otherwise after vector search (e.g., {"documentName": "foo.pdf"}). Filters results by exact property match. Check get_neo4j_schema_and_indexes for available node properties.'
         ),
     ) -> list[ToolResult]:
         """
@@ -343,7 +344,7 @@ def create_mcp_server(
         - Check get_neo4j_schema_and_indexes for property warnings to avoid large fields
 
         **Post-Filtering:**
-        - Use pre_filter to filter results by exact property match after vector scoring (e.g., {"documentName": "foo.pdf"})
+        - Use pre_filter for exact property matches; indexed filters use SEARCH in-index filtering on supported servers, otherwise filtering follows vector scoring (e.g., {"documentName": "foo.pdf"})
         - Check get_neo4j_schema_and_indexes for available node properties to filter on
 
         **Performance Optimization:**
@@ -355,9 +356,9 @@ def create_mcp_server(
             # Get the embedding property name from the vector index
             index_info_query = """
             SHOW INDEXES
-            YIELD name, type, properties
+            YIELD name, type, properties, state, entityType
             WHERE name = $index_name AND type = 'VECTOR'
-            RETURN properties
+            RETURN properties, state, entityType
             """
             
             index_info = await neo4j_driver.execute_query(
@@ -371,6 +372,10 @@ def create_mcp_server(
             if not index_info:
                 raise ToolError(f"Vector index '{vector_index}' not found. Use get_neo4j_schema_and_indexes to see available indexes.")
             
+            if index_info[0]["state"] != "ONLINE":
+                raise ToolError(f"Vector index '{vector_index}' is {index_info[0]['state']}; wait for ONLINE or inspect SHOW VECTOR INDEXES for failures.")
+            if index_info[0]["entityType"] != "NODE":
+                raise ToolError("vector_search requires a node vector index")
             embedding_property = index_info[0]["properties"][0] if index_info[0]["properties"] else None
             logger.debug(f"Embedding property for index '{vector_index}': {embedding_property}")
 
@@ -400,20 +405,27 @@ def create_mcp_server(
                 "query_vector": query_embedding,
             }
 
-            call_clause = "CALL db.index.vector.queryNodes($index_name, $fetch_k, $query_vector)"
 
             where_clause = ""
             if pre_filter:
-                conditions = " AND ".join([f"node.{k} = $pf_{k}" for k in pre_filter.keys()])
+                conditions = " AND ".join([f"node.`{k.replace(chr(96), chr(96)*2)}` = $pf_{i}" for i, k in enumerate(pre_filter.keys())])
                 where_clause = f"WHERE {conditions}"
-                for k, v in pre_filter.items():
-                    search_params[f"pf_{k}"] = v
+                for i, (k, v) in enumerate(pre_filter.items()):
+                    search_params[f"pf_{i}"] = v
+
+            indexed_filter_properties = set(index_info[0]["properties"][1:])
+            in_index_filter = bool(pre_filter) and set(pre_filter) <= indexed_filter_properties
+            call_clause = await search_source(
+                neo4j_driver, database, "VECTOR", vector_index,
+                filter_predicate=conditions if in_index_filter else None,
+            )
+            if in_index_filter and call_clause.startswith("CYPHER 25"):
+                where_clause = ""
 
             if property_list:
-                props_return = ", ".join([f"node.{prop} as {prop}" for prop in property_list])
+                props_return = ", ".join([f"node.`{prop.replace(chr(96), chr(96)*2)}` as `{prop.replace(chr(96), chr(96)*2)}`" for prop in property_list])
                 search_query = f"""
                 {call_clause}
-                YIELD node, score
                 {where_clause}
                 RETURN elementId(node) as nodeId, labels(node) as labels, {props_return}, score
                 ORDER BY score DESC
@@ -422,7 +434,6 @@ def create_mcp_server(
             else:
                 search_query = f"""
                 {call_clause}
-                YIELD node, score
                 {where_clause}
                 RETURN elementId(node) as nodeId, labels(node) as labels, properties(node) as properties, score
                 ORDER BY score DESC
@@ -523,9 +534,9 @@ def create_mcp_server(
             # Get index entity type
             index_info_query = """
             SHOW INDEXES
-            YIELD name, type, entityType
+            YIELD name, type, entityType, state
             WHERE name = $index_name AND type = 'FULLTEXT'
-            RETURN entityType
+            RETURN entityType, state
             """
             
             index_info = await neo4j_driver.execute_query(
@@ -539,7 +550,10 @@ def create_mcp_server(
             if not index_info:
                 raise ToolError(f"Fulltext index '{fulltext_index}' not found. Use get_neo4j_schema_and_indexes to see available indexes.")
 
+            if index_info[0]["state"] != "ONLINE":
+                raise ToolError(f"Fulltext index '{fulltext_index}' is {index_info[0]['state']}; wait for ONLINE or inspect SHOW FULLTEXT INDEXES for failures.")
             entity_type = index_info[0]["entityType"]
+            source = await search_source(neo4j_driver, database, "FULLTEXT", fulltext_index, relationship=entity_type != "NODE")
 
             # Parse return_properties if provided (comma-separated string)
             property_list = None
@@ -550,36 +564,32 @@ def create_mcp_server(
             # Build RETURN clause based on return_properties and entity_type
             if entity_type == "NODE":
                 if property_list:
-                    props_return = ", ".join([f"node.{prop} as {prop}" for prop in property_list])
+                    props_return = ", ".join([f"node.`{prop.replace(chr(96), chr(96)*2)}` as `{prop.replace(chr(96), chr(96)*2)}`" for prop in property_list])
                     search_query = f"""
-                    CALL db.index.fulltext.queryNodes($index_name, $query)
-                    YIELD node, score
+                    {source}
                     RETURN elementId(node) as nodeId, labels(node) as labels, {props_return}, score
                     ORDER BY score DESC
                     LIMIT $top_k
                     """
                 else:
-                    search_query = """
-                    CALL db.index.fulltext.queryNodes($index_name, $query)
-                    YIELD node, score
+                    search_query = f"""
+                    {source}
                     RETURN elementId(node) as nodeId, labels(node) as labels, properties(node) as properties, score
                     ORDER BY score DESC
                     LIMIT $top_k
                     """
             else:
                 if property_list:
-                    props_return = ", ".join([f"relationship.{prop} as {prop}" for prop in property_list])
+                    props_return = ", ".join([f"relationship.`{prop.replace(chr(96), chr(96)*2)}` as `{prop.replace(chr(96), chr(96)*2)}`" for prop in property_list])
                     search_query = f"""
-                    CALL db.index.fulltext.queryRelationships($index_name, $query)
-                    YIELD relationship, score
+                    {source}
                     RETURN elementId(relationship) as relationshipId, type(relationship) as type, {props_return}, score
                     ORDER BY score DESC
                     LIMIT $top_k
                     """
                 else:
-                    search_query = """
-                    CALL db.index.fulltext.queryRelationships($index_name, $query)
-                    YIELD relationship, score
+                    search_query = f"""
+                    {source}
                     RETURN elementId(relationship) as relationshipId, type(relationship) as type, properties(relationship) as properties, score
                     ORDER BY score DESC
                     LIMIT $top_k

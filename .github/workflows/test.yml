@@ -18,10 +18,13 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv run python -m unittest discover -s tests/unit -v
   integration:
+    strategy:
+      matrix:
+        neo4j: ['5.26-community', '2026.09.0-community']
     runs-on: ubuntu-latest
     services:
       neo4j:
-        image: neo4j:5.26-community
+        image: neo4j:${{ matrix.neo4j }}
         env:
           NEO4J_AUTH: neo4j/test-password
         ports:
