@@ -89,7 +89,7 @@ WITH collect(e) AS items
 UNWIND range(0,size(items)-1) AS i
 WITH items[i] AS e,i, CASE WHEN i=0 THEN $text_offset ELSE 0 END AS start
 RETURN e.id AS element_id, elementId(e) AS node_element_id, labels(e) AS labels, e.type AS type,
- e.pageNumber AS page_number,
+ e.pageNumber AS page_number, e.sourceAnchor AS source_anchor,
  [(e)<-[:HAS_ELEMENT]-(section:Section)<-[:HAS_SECTION]-(owner:Document {id:$document_id}) | section.id] AS section_ids,
  substring(CASE WHEN coalesce(e.text,'') <> '' THEN e.text ELSE coalesce(e.textDescription,'') END, start, $max_chars) AS text,
  size(CASE WHEN coalesce(e.text,'') <> '' THEN e.text ELSE coalesce(e.textDescription,'') END) AS text_length,
@@ -220,6 +220,7 @@ async def _document(driver, database, timeout, document_id):
         DOC
         + """
         RETURN d.id AS document_id,d.name AS document_name,d.source AS source,
+               d.sourceFormat AS source_format,
                d.sourceId AS source_id,d.version AS version,d.parseMode AS parse_mode,
                COUNT { (d)-[:HAS_SECTION]->(:Section) } AS section_count LIMIT 2
     """,
@@ -239,6 +240,8 @@ def _content_page(rows, document, offset, text_offset, limit, max_chars):
         text = row["text"][:remaining]
         consumed = len(text)
         page_index = row.pop("page_number", None)
+        if document.get("source_format") in {"markdown", "text", "html", "docx"}:
+            page_index = None
         item = {
             **row,
             "text": text,
@@ -246,6 +249,7 @@ def _content_page(rows, document, offset, text_offset, limit, max_chars):
             "citation": {
                 **document,
                 "element_id": row["element_id"],
+                "source_anchor": row.get("source_anchor"),
                 "page_index": page_index,
                 "section_ids": row.get("section_ids", []),
                 "page_number": page_index + 1 if page_index is not None else None,
@@ -302,6 +306,7 @@ def register_pageindex_tools(
               AND ($query IS NULL OR toLower(coalesce(d.name,'')) CONTAINS toLower($query)
                    OR toLower(d.id) CONTAINS toLower($query))
             RETURN d.id AS document_id,d.name AS document_name,d.source AS source,
+               d.sourceFormat AS source_format,
                    d.version AS version,d.parseMode AS parse_mode,d.totalPages AS source_page_count,
                    COUNT { (d)-[:HAS_SECTION]->(:Section) } AS section_count
             ORDER BY document_name,document_id SKIP $offset LIMIT $take

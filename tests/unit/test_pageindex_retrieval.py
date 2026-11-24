@@ -45,6 +45,25 @@ class ContentPageTests(unittest.TestCase):
         self.assertEqual({"offset": 3, "text_offset": 0}, result["next"])
         self.assertFalse(_content_page([row()], DOC, 0, 0, 20, 12)["has_more"])
 
+    def test_pageless_source_anchor_and_format_survive_text_continuation(self):
+        for source_format in ("markdown", "text", "html", "docx"):
+            with self.subTest(source_format=source_format):
+                document = {**DOC, "source_format": source_format}
+                element = {
+                    **row(),
+                    "source_anchor": "lines:4-6",
+                    "node_element_id": "4:fixture:7",
+                }
+                result = _content_page([element], document, 2, 0, 20, 3)
+                item = result["items"][0]
+                self.assertEqual("lines:4-6", item["source_anchor"])
+                self.assertEqual("lines:4-6", item["citation"]["source_anchor"])
+                self.assertEqual(source_format, item["citation"]["source_format"])
+                self.assertIsNone(item["citation"]["page_index"])
+                self.assertIsNone(item["citation"]["page_number"])
+                self.assertEqual("4:fixture:7", item["node_element_id"])
+                self.assertEqual({"offset": 2, "text_offset": 3}, result["next"])
+
     def test_invalid_bounds_and_offsets(self):
         for values in [(0, 26, 25), (-1, 1, 25), (0, 1, 25, 0, 20001)]:
             with self.assertRaises(ToolError):
@@ -129,7 +148,6 @@ class RetrievalMCPTests(unittest.IsolatedAsyncioTestCase):
             {"query": "literal"}, session.run.call_args.kwargs["parameters"]
         )
 
-
     async def test_only_capability_probe_suppresses_schema_notifications(self):
         session = AsyncMock()
         session.run.return_value.data.return_value = [
@@ -142,7 +160,8 @@ class RetrievalMCPTests(unittest.IsolatedAsyncioTestCase):
         driver.session.return_value = context
         await _query(driver, "isolated", 7, CAPABILITIES)
         driver.session.assert_called_once_with(
-            database="isolated", default_access_mode=READ_ACCESS,
+            database="isolated",
+            default_access_mode=READ_ACCESS,
             notifications_min_severity="OFF",
         )
         driver.session.reset_mock()

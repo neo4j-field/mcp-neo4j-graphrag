@@ -267,3 +267,125 @@ class PageIndexVisibilityIntegrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await write("MATCH (n {testRunId:$run}) DETACH DELETE n")
             await driver.close()
+
+
+@unittest.skipUnless(
+    os.getenv("NEO4J_MCP_RUN_INTEGRATION") == "1", "opt-in disposable graph test"
+)
+class PagelessCitationIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_headings_and_text_anchors_without_page_nodes(self):
+        driver = AsyncGraphDatabase.driver(
+            os.environ["NEO4J_URI"],
+            auth=(os.environ["NEO4J_USERNAME"], os.environ["NEO4J_PASSWORD"]),
+        )
+        database = os.getenv("NEO4J_DATABASE", "neo4j")
+        run_id = uuid4().hex
+
+        async def write(statement, **parameters):
+            async with driver.session(database=database) as session:
+                result = await session.run(statement, run=run_id, **parameters)
+                return await result.data()
+
+        server = FastMCP("pageless-citations")
+        register_pageindex_tools(server, driver, database, "", 7)
+        core = {"list_retrieval_documents", "get_document_content"}
+        try:
+            async with Client(server) as client:
+
+                async def call(name, **arguments):
+                    result = await client.call_tool(name, arguments)
+                    return json.loads(result.content[0].text)
+
+                for source_format in ("markdown", "docx", "text"):
+                    with self.subTest(source_format=source_format):
+                        doc = run_id + "-" + source_format
+                        await write(
+                            """
+                            CREATE (d:Document {id:$doc, name:$doc, active:true,
+                                sourceFormat:$format, source:'/fixture/source', testRunId:$run})
+                            CREATE (e:Element {id:$doc+'-e', text:'FIRSTSECOND', order:0,
+                                sourceAnchor:'element:3', testRunId:$run})
+                            CREATE (d)-[:HAS_ELEMENT]->(e)
+                        """,
+                            doc=doc,
+                            format=source_format,
+                        )
+                        if source_format != "text":
+                            await write(
+                                """
+                                MATCH (d:Document {id:$doc})-[:HAS_ELEMENT]->(e)
+                                CREATE (s:Section {id:$doc+'-root',title:'Native root',level:1,order:0,testRunId:$run})
+                                CREATE (c:Section {id:$doc+'-child',title:'Native child',level:2,order:1,testRunId:$run})
+                                CREATE (d)-[:HAS_SECTION]->(s),(d)-[:HAS_SECTION]->(c),
+                                    (s)-[:HAS_SUBSECTION]->(c),(c)-[:HAS_ELEMENT]->(e)
+                            """,
+                                doc=doc,
+                            )
+                        else:
+                            await write(
+                                "MATCH (:Document {id:$doc})-[:HAS_ELEMENT]->(e) SET e.sourceAnchor='lines:4-6'",
+                                doc=doc,
+                            )
+                        names = {tool.name for tool in await client.list_tools()}
+                        expected = (
+                            core
+                            if source_format == "text"
+                            else core | {"get_document_outline", "get_section_content"}
+                        )
+                        self.assertEqual(expected, names)
+                        documents = await call("list_retrieval_documents", query=doc)
+                        self.assertEqual(
+                            source_format, documents["items"][0]["source_format"]
+                        )
+                        arguments = dict(document_id=doc, max_chars=4)
+                        tool = "get_document_content"
+                        if source_format != "text":
+                            outline = await call(
+                                "get_document_outline",
+                                document_id=doc,
+                                root_section_id=doc + "-child",
+                                depth=1,
+                            )
+                            self.assertEqual(
+                                [doc + "-root", doc + "-child"],
+                                [s["section_id"] for s in outline["items"][0]["path"]],
+                            )
+                            tool = "get_section_content"
+                            arguments["section_id"] = doc + "-root"
+                        text = ""
+                        for _ in range(5):
+                            response = await call(tool, **arguments)
+                            self.assertEqual(
+                                source_format, response["document"]["source_format"]
+                            )
+                            for item in response["items"]:
+                                text += item["text"]
+                                expected_anchor = (
+                                    "lines:4-6"
+                                    if source_format == "text"
+                                    else "element:3"
+                                )
+                                self.assertEqual(expected_anchor, item["source_anchor"])
+                                self.assertEqual(
+                                    expected_anchor, item["citation"]["source_anchor"]
+                                )
+                                self.assertEqual(
+                                    source_format, item["citation"]["source_format"]
+                                )
+                                self.assertIsNone(item["citation"]["page_index"])
+                                self.assertIsNone(item["citation"]["page_number"])
+                                self.assertTrue(item["node_element_id"])
+                            if not response["next"]:
+                                break
+                            arguments.update(response["next"])
+                        else:
+                            self.fail("pageless continuation did not terminate")
+                        self.assertEqual("FIRSTSECOND", text)
+                        pages = await write(
+                            "MATCH (n:Page {testRunId:$run}) RETURN count(n) AS count"
+                        )
+                        self.assertEqual(0, pages[0]["count"])
+                        await write("MATCH (n {testRunId:$run}) DETACH DELETE n")
+        finally:
+            await write("MATCH (n {testRunId:$run}) DETACH DELETE n")
+            await driver.close()

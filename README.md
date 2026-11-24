@@ -109,7 +109,12 @@ The native structure uses `Document-HAS_SECTION->Section`,
 `Section-HAS_SUBSECTION->Section` and shared `Element` membership. Document links
 include **all** sections, not just roots. Element/page/chunk fallback is explicit
 for parsers without sections. Citations expose 1-based `page_number` alongside
-stored 0-based `page_index`; unavailable page numbers remain null. Newly parsed
+stored 0-based `page_index`; unavailable page numbers remain null. Pageless
+Markdown, TXT, local HTML and DOCX return `source_format` in document metadata and
+citations, plus each element's stored `source_anchor` (for example `element:3` or
+`lines:4-6`) on the item and citation. Their page fields remain null; use the
+source path, anchor and native section path rather than an invented page number.
+`node_element_id` remains available for reading linked visual evidence. Newly parsed
 sections have order and descendant page ranges; legacy missing ranges remain null.
 No parser migration or new index is required. Pagination assumes the selected
 version is not modified between calls. These tools do not add cross-document links,
