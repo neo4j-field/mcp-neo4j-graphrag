@@ -130,6 +130,28 @@ class RetrievalMCPTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    async def test_only_capability_probe_suppresses_schema_notifications(self):
+        session = AsyncMock()
+        session.run.return_value.data.return_value = [
+            {"documents": False, "sections": False}
+        ]
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=session)
+        context.__aexit__ = AsyncMock(return_value=False)
+        driver = MagicMock()
+        driver.session.return_value = context
+        await _query(driver, "isolated", 7, CAPABILITIES)
+        driver.session.assert_called_once_with(
+            database="isolated", default_access_mode=READ_ACCESS,
+            notifications_min_severity="OFF",
+        )
+        driver.session.reset_mock()
+        await _query(driver, "isolated", 7, "MATCH (d:Document) RETURN d.id")
+        driver.session.assert_called_once_with(
+            database="isolated", default_access_mode=READ_ACCESS
+        )
+
+
 class DynamicDiscoveryTests(unittest.IsolatedAsyncioTestCase):
     def server(self):
         server = FastMCP("dynamic-discovery")

@@ -198,8 +198,13 @@ def _page(rows, offset, limit):
 
 
 async def _query(driver, database, timeout, statement, **parameters):
+    session_options = {}
+    if statement == CAPABILITIES:
+        # Missing lexical labels/properties are expected on an empty or business-
+        # only graph. Suppress probe notifications, not retrieval diagnostics/errors.
+        session_options["notifications_min_severity"] = "OFF"
     async with driver.session(
-        database=database, default_access_mode=READ_ACCESS
+        database=database, default_access_mode=READ_ACCESS, **session_options
     ) as session:
         result = await session.run(
             Query(statement, timeout=timeout), parameters=parameters
