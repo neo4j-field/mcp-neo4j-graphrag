@@ -13,7 +13,7 @@ from neo4j.exceptions import ClientError, Neo4jError
 from pydantic import Field
 
 from .search_indexes import search_source
-from .pageindex import register_pageindex_tools
+from .pageindex import _PageIndexDiscovery, register_pageindex_tools
 from .ontology import register_ontology_tools
 
 from .utils import (
@@ -52,9 +52,12 @@ def create_mcp_server(
 ) -> FastMCP:
     """Create the unified GraphRAG MCP server."""
     
-    mcp: FastMCP = FastMCP("mcp-neo4j-graphrag")
     namespace_prefix = _format_namespace(namespace)
-    register_pageindex_tools(mcp, neo4j_driver, database, namespace_prefix, read_timeout)
+    discovery = _PageIndexDiscovery(neo4j_driver, database, namespace_prefix, read_timeout)
+    mcp: FastMCP = FastMCP("mcp-neo4j-graphrag", lifespan=discovery.lifespan)
+    register_pageindex_tools(
+        mcp, neo4j_driver, database, namespace_prefix, read_timeout, discovery=discovery
+    )
     register_ontology_tools(
         mcp, neo4j_driver, database, namespace_prefix, read_timeout,
         ontology_path=ontology_path, ontology_name=ontology_name,

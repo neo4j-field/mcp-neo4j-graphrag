@@ -1,7 +1,11 @@
 """Bounded, model-free navigation of the workspace's existing lexical graph."""
 
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional
+from weakref import WeakKeyDictionary
+
+import anyio
 
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
@@ -124,9 +128,13 @@ EXISTS {
 
 
 class _PageIndexDiscovery(Middleware):
-    """Reevaluate actual lexical topology on every discovery and navigation call."""
+    """Hide unsupported tools and notify connected clients after external ingestion.
 
-    def __init__(self, driver, database, prefix, timeout):
+    The server lifespan owns one observer, with one capability query per tick
+    shared by sessions. Clients must honor MCP tools/list_changed notifications.
+    """
+
+    def __init__(self, driver, database, prefix, timeout, poll_interval=2.0):
         self.driver, self.database, self.timeout = driver, database, timeout
         self.document_tools = {
             prefix + name
@@ -136,11 +144,59 @@ class _PageIndexDiscovery(Middleware):
             prefix + name for name in ("get_document_outline", "get_section_content")
         }
         self.navigation_tools = self.document_tools | self.section_tools
+        self.poll_interval = poll_interval
+        # Each client caches its own tools/list result. Do not use a global
+        # previous state: a newly connected client must not consume a change
+        # notification owed to an older client.
+        self._sessions = WeakKeyDictionary()
 
-    async def enabled(self):
+    @asynccontextmanager
+    async def lifespan(self, server):
+        """Observe external ingestion only while this MCP server is running."""
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(self._observe)
+            try:
+                yield {}
+            finally:
+                tasks.cancel_scope.cancel()
+                self._sessions.clear()
+
+    async def _observe(self):
+        while True:
+            await anyio.sleep(self.poll_interval)
+            if self._sessions:
+                try:
+                    await self._refresh_sessions()
+                except Exception:
+                    # A background discovery failure must not terminate the MCP
+                    # lifespan. Cancellation still propagates (BaseException).
+                    logger.exception("Lexical tool availability refresh failed; retaining client state")
+
+    async def _refresh_sessions(self):
+        # A failed probe is not evidence that lexical content disappeared.
+        # Let the observer retain cached capabilities and retry on its next tick.
+        enabled = await self.enabled(hide_on_error=False)
+        for session, previous in list(self._sessions.items()):
+            if previous == enabled:
+                continue
+            # Store before sending: a client may immediately re-list on receipt.
+            self._sessions[session] = enabled
+            try:
+                await session.send_tool_list_changed()
+            except (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream):
+                self._sessions.pop(session, None)
+            except Exception:
+                # A broken client notification channel must not affect other
+                # sessions. A subsequent tools/list re-enrolls this session.
+                self._sessions.pop(session, None)
+                logger.exception("Cannot notify MCP client of changed lexical tools")
+
+    async def enabled(self, *, hide_on_error=True):
         try:
             rows = await _query(self.driver, self.database, self.timeout, CAPABILITIES)
         except (Neo4jError, DriverError) as exc:
+            if not hide_on_error:
+                raise
             logger.warning(
                 "Cannot inspect lexical graph tool availability; hiding navigation tools: %s",
                 exc,
@@ -163,6 +219,8 @@ class _PageIndexDiscovery(Middleware):
     async def on_list_tools(self, context, call_next):
         tools = await call_next(context)
         enabled = await self.enabled()
+        if context.fastmcp_context is not None:
+            self._sessions[context.fastmcp_context.session] = enabled
         return [
             tool
             for tool in tools
@@ -279,10 +337,10 @@ def _content_page(rows, document, offset, text_offset, limit, max_chars):
 
 
 def register_pageindex_tools(
-    mcp, driver, database, namespace_prefix="", read_timeout=30
+    mcp, driver, database, namespace_prefix="", read_timeout=30, *, discovery=None
 ):
     mcp.add_middleware(
-        _PageIndexDiscovery(driver, database, namespace_prefix, read_timeout)
+        discovery or _PageIndexDiscovery(driver, database, namespace_prefix, read_timeout)
     )
 
     @mcp.tool(
