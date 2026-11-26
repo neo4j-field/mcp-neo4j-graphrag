@@ -6,7 +6,10 @@ on:
       - "v*"
 
 jobs:
+  test-suite:
+    uses: ./.github/workflows/test.yml
   build-and-publish:
+    needs: test-suite
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

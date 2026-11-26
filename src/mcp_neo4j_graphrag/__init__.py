@@ -39,6 +39,8 @@ def main():
         help="Default sample size for schema operations (default: 1000)",
     )
 
+    parser.add_argument("--ontology-file", default=None, help="Ontology Graph Spec YAML/JSON file for get_ontology (or ONTOLOGY_FILE)")
+    parser.add_argument("--ontology-name", default=None, help="Default ontology name in the template Ontology DB (or ONTOLOGY_NAME)")
     args = parser.parse_args()
     config = process_config(args)
     asyncio.run(server.main(**config))

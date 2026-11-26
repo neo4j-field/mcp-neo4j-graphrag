@@ -249,5 +249,11 @@ def process_config(args: argparse.Namespace) -> dict[str, Union[str, int, None]]
         sample_env = os.getenv("NEO4J_SCHEMA_SAMPLE_SIZE")
         config["schema_sample_size"] = int(sample_env) if sample_env else 1000
 
+    config["ontology_file"] = getattr(args, "ontology_file", None) or os.getenv("ONTOLOGY_FILE") or None
+    config["ontology_name"] = getattr(args, "ontology_name", None) or os.getenv("ONTOLOGY_NAME") or None
+    config["ontology_db_url"] = os.getenv("NEO4J_ONTOLOGY_URI") or None
+    config["ontology_username"] = os.getenv("NEO4J_ONTOLOGY_USERNAME") or None
+    config["ontology_password"] = os.getenv("NEO4J_ONTOLOGY_PASSWORD") or None
+    config["ontology_database"] = os.getenv("NEO4J_ONTOLOGY_DATABASE") or None
     return config
 
